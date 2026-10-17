@@ -1,0 +1,195 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline DevSecOps : la sécurité est vérifiée automatiquement à chaque push
+# et à chaque Pull Request. Si une étape échoue, le code ne part pas en prod.
+#
+#   1. Secrets       > Gitleaks   : mots de passe / clés API dans le code
+#   2. SAST          > Bandit     : failles dans le code source (injection...)
+#   3. SCA           > pip-audit  : dépendances avec CVE connues
+#   4. IaC           > Checkov    : Dockerfile + Terraform mal configurés
+#   5. Image         > Trivy      : CVE dans l'image Docker construite
+#   6. DAST          > attaques réelles + OWASP ZAP sur l'app qui tourne
+#   7. Security Gate > verdict final : déployable ou bloqué
+# ─────────────────────────────────────────────────────────────────────────────
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Principe du moindre privilège : le token du pipeline ne peut que lire
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: "1 - Secrets (Gitleaks)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recherche de secrets dans le code
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" ghcr.io/gitleaks/gitleaks:latest \
+            dir /repo --redact --verbose \
+            --report-format sarif --report-path /repo/gitleaks.sarif
+      - name: Publier dans l'onglet Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+  sast:
+    name: "2 - SAST (Bandit)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "bandit[sarif]"
+      - name: Analyse statique du code source
+        run: bandit -r app/ -ll
+      - name: Rapport SARIF
+        if: always()
+        run: bandit -r app/ -ll -f sarif -o bandit.sarif || true
+      - name: Publier dans l'onglet Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+  sca:
+    name: "3 - Dépendances (pip-audit)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - name: Recherche de CVE dans les dépendances
+        run: pip-audit -r app/requirements.txt --desc on
+
+  iac:
+    name: "4 - IaC (Checkov)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install checkov
+      - name: Analyse du Dockerfile et du Terraform
+        run: |
+          checkov -d . --skip-path fixes --framework terraform,dockerfile --compact \
+            --check CKV_AWS_53,CKV_AWS_54,CKV_AWS_55,CKV_AWS_56,CKV_AWS_24,CKV_AWS_382,CKV_DOCKER_2,CKV_DOCKER_3,CKV_DOCKER_4,CKV_DOCKER_7 \
+            -o cli -o sarif --output-file-path console,checkov-out
+      - name: Publier dans l'onglet Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: checkov-out/results_sarif.sarif
+          category: checkov
+
+  image:
+    name: "5 - Image Docker (Trivy)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construction de l'image
+        run: docker build -t shopnotes:${{ github.sha }} .
+      - name: Scan de l'image (bloquant sur CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+            image --severity HIGH,CRITICAL --ignore-unfixed --no-progress shopnotes:${{ github.sha }} | tail -60
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+            image --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress --quiet --format table \
+            shopnotes:${{ github.sha }} > /dev/null
+      - name: Rapport SARIF
+        if: always()
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" aquasec/trivy:latest \
+            image --severity HIGH,CRITICAL --ignore-unfixed --format sarif -o /out/trivy.sarif --quiet \
+            shopnotes:${{ github.sha }} || true
+      - name: Publier dans l'onglet Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+  dast:
+    name: "6 - DAST (attaques + OWASP ZAP)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construire et lancer l'application
+        run: |
+          docker build -t shopnotes:dast .
+          docker run -d --name shopnotes -p 5000:5000 shopnotes:dast
+          for i in $(seq 1 30); do curl -sf http://localhost:5000/health && break; sleep 2; done
+      - name: Tests d'attaque (bloquants)
+        run: ./scripts/attack-tests.sh http://localhost:5000
+      - name: Scan OWASP ZAP (rapport)
+        if: always()
+        run: |
+          mkdir -p zap && chmod 777 zap
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://localhost:5000 -r zap-report.html -I || true
+      - name: Rapport ZAP téléchargeable
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap/zap-report.html
+          if-no-files-found: ignore
+      - name: Logs de l'application
+        if: always()
+        run: docker logs shopnotes | tail -30
+
+  gate:
+    name: "7 - Security Gate"
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [secrets, sast, sca, iac, image, dast]
+    steps:
+      - name: Verdict
+        run: |
+          icon() { [ "$1" = "success" ] && echo "✅" || echo "❌"; }
+          {
+            echo "## 🛡️ Security Gate"
+            echo ""
+            echo "| Contrôle | Outil | Résultat |"
+            echo "|---|---|---|"
+            echo "| Secrets | Gitleaks | $(icon ${{ needs.secrets.result }}) |"
+            echo "| Code source (SAST) | Bandit | $(icon ${{ needs.sast.result }}) |"
+            echo "| Dépendances (SCA) | pip-audit | $(icon ${{ needs.sca.result }}) |"
+            echo "| Infrastructure (IaC) | Checkov | $(icon ${{ needs.iac.result }}) |"
+            echo "| Image Docker | Trivy | $(icon ${{ needs.image.result }}) |"
+            echo "| App en marche (DAST) | Attaques + ZAP | $(icon ${{ needs.dast.result }}) |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "### ⛔ Déploiement BLOQUÉ : corriger les contrôles en échec" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "### 🚀 Tous les contrôles passent : déployable" >> "$GITHUB_STEP_SUMMARY"

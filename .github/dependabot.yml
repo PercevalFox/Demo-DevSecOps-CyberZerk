@@ -1,0 +1,16 @@
+# Dependabot : ouvre automatiquement des Pull Requests quand une dépendance
+# a une nouvelle version ou une faille connue. Le pipeline teste chaque PR.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/app"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
