@@ -63,7 +63,7 @@ def health():
 def get_user():
     name = request.args.get("name", "")
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT id, name, email FROM users WHERE name = ?", (name,)).fetchall()
+    rows = conn.execute("SELECT id, name, email FROM users WHERE name = '" + name + "'").fetchall()
     conn.close()
     return jsonify(rows)
 
