@@ -1,24 +1,23 @@
 """
 ShopNotes - mini API de démo DevSecOps.
-
-⚠️  VERSION VOLONTAIREMENT VULNÉRABLE - NE JAMAIS DÉPLOYER ⚠️
-Chaque faille est numérotée (VULN-x) pour la démo.
+VERSION CORRIGÉE - chaque correctif répond à une VULN-x de la version vulnérable.
 """
+import ipaddress
 import os
 import sqlite3
-import subprocess
+# subprocess utilisé sans shell, avec une entrée validée : risque accepté et tracé
+import subprocess  # nosec B404
 
 import yaml
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort
 
 app = Flask(__name__)
 
-# VULN-1 : secret codé en dur dans le code source (détecté par Gitleaks + Semgrep)
-FLASK_SECRET_KEY = "f9K2LmQ7vR4tZp8Wn3Yb6Hc1Jd5Ge0XaQ8"
-PAYMENT_API_TOKEN = "pay_prod_7Hq2Zr9LmX4vT8nB3cW6yK1dF5gJ0sPe"
-app.config["SECRET_KEY"] = FLASK_SECRET_KEY
+# FIX-1 : le secret vient de l'environnement (GitHub Secrets, Vault, AWS Secrets Manager...)
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(32))
+PAYMENT_API_TOKEN = os.environ.get("PAYMENT_API_TOKEN")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "shop.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.expanduser("~"), "shop.db"))
 
 
 def init_db():
@@ -33,6 +32,22 @@ def init_db():
     conn.close()
 
 
+init_db()
+
+
+@app.after_request
+def security_headers(resp):
+    # En-têtes de sécurité HTTP (remontés par le scan DAST OWASP ZAP)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
+    resp.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.route("/")
 def index():
     return jsonify(service="shopnotes", status="ok")
@@ -43,35 +58,33 @@ def health():
     return "ok"
 
 
-# VULN-2 : injection SQL (concaténation de l'entrée utilisateur)
-# Démo : /user?name=' OR '1'='1   > renvoie TOUS les utilisateurs
+# FIX-2 : requête paramétrée, l'entrée n'est jamais interprétée comme du SQL
 @app.route("/user")
 def get_user():
     name = request.args.get("name", "")
     conn = sqlite3.connect(DB_PATH)
-    query = "SELECT id, name, email FROM users WHERE name = '" + name + "'"
-    rows = conn.execute(query).fetchall()
+    rows = conn.execute("SELECT id, name, email FROM users WHERE name = ?", (name,)).fetchall()
     conn.close()
     return jsonify(rows)
 
 
-# VULN-3 : injection de commande (shell=True + entrée utilisateur)
-# Démo : /ping?host=127.0.0.1;id
+# FIX-3 : validation stricte de l'entrée + pas de shell, arguments passés en liste
 @app.route("/ping")
 def ping():
     host = request.args.get("host", "127.0.0.1")
-    out = subprocess.check_output("ping -c 1 " + host, shell=True)
-    return out
+    try:
+        ip = str(ipaddress.ip_address(host))
+    except ValueError:
+        abort(400, "adresse IP invalide")
+    out = subprocess.run(["/bin/ping", "-c", "1", ip], capture_output=True, timeout=5, check=False)  # nosec B603
+    return out.stdout
 
 
-# VULN-4 : désérialisation dangereuse (yaml.load sans SafeLoader)
+# FIX-4 : safe_load n'instancie aucun objet Python arbitraire
 @app.route("/import", methods=["POST"])
 def import_config():
-    data = yaml.load(request.data, Loader=yaml.Loader)
+    data = yaml.safe_load(request.data)
     return jsonify(imported=str(data))
 
 
-if __name__ == "__main__":
-    init_db()
-    # VULN-5 : mode debug activé + écoute sur toutes les interfaces
-    app.run(host="0.0.0.0", port=5000, debug=True)
+# FIX-5 : plus de app.run(debug=True) : l'app est servie par gunicorn (voir Dockerfile)
