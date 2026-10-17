@@ -1,5 +1,5 @@
 # FIX-7 : image minimale et récente (surface d'attaque réduite)
-FROM python:3.13-alpine
+FROM python:3.14-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
