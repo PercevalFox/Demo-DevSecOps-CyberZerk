@@ -1,5 +1,5 @@
 # VULN-6 : dépendances obsolètes avec CVE connues (détectées par pip-audit / Trivy)
-flask==0.12.2
+flask==3.1.3
 Werkzeug==0.15.3
 Jinja2==2.10
 MarkupSafe==1.1.1
