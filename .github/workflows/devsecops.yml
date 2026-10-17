@@ -157,7 +157,7 @@ jobs:
             zap-baseline.py -t http://localhost:5000 -r zap-report.html -I || true
       - name: Rapport ZAP téléchargeable
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zap-report
           path: zap/zap-report.html
