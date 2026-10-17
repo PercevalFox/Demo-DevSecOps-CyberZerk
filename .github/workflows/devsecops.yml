@@ -30,7 +30,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Recherche de secrets dans le code
         run: |
           docker run --rm -v "${{ github.workspace }}:/repo" ghcr.io/gitleaks/gitleaks:latest \
@@ -51,8 +51,8 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install "bandit[sarif]"
@@ -73,8 +73,8 @@ jobs:
     name: "3 - Dépendances (pip-audit)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install pip-audit
@@ -88,8 +88,8 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install checkov
@@ -103,7 +103,7 @@ jobs:
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: checkov-out/results_sarif.sarif
+          sarif_file: checkov-out
           category: checkov
 
   image:
@@ -113,7 +113,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Construction de l'image
         run: docker build -t shopnotes:${{ github.sha }} .
       - name: Scan de l'image (bloquant sur CRITICAL)
@@ -141,14 +141,14 @@ jobs:
     name: "6 - DAST (attaques + OWASP ZAP)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Construire et lancer l'application
         run: |
           docker build -t shopnotes:dast .
           docker run -d --name shopnotes -p 5000:5000 shopnotes:dast
           for i in $(seq 1 30); do curl -sf http://localhost:5000/health && break; sleep 2; done
       - name: Tests d'attaque (bloquants)
-        run: ./scripts/attack-tests.sh http://localhost:5000
+        run: bash scripts/attack-tests.sh http://localhost:5000
       - name: Scan OWASP ZAP (rapport)
         if: always()
         run: |
@@ -157,7 +157,7 @@ jobs:
             zap-baseline.py -t http://localhost:5000 -r zap-report.html -I || true
       - name: Rapport ZAP téléchargeable
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zap-report
           path: zap/zap-report.html
